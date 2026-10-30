@@ -111,8 +111,9 @@
  * reads the pill's resistance. The row is an input with its pull-up again at the next tick, before the rows are read.
  * With fm1_an.probe set, a third frame phase reads the top row, PA6 (keys 20..26, columns 0..6, no converter of its
  * own), through PA10, its LED line: PA10 an input with its pull-up, PA6 driven, so a pressed key lifts the column's
- * low level, the more the harder it is pressed. FM1_INPUT_PROBE(col, rowbit, v, pressed) gets each reading, with
- * the scan's last view of that key. A lit LED in a column lifts its keys' readings: FM1_INPUT_LED_OK(col, rowbit)
+ * low level, the more the harder it is pressed (an open key: one probe frame in FM1_PROBE_IDLE, its pull-up lighting
+ * the key's LED faintly). FM1_INPUT_PROBE(col, rowbit, v, pressed) gets each reading, with the scan's last view of
+ * that key. A lit LED in a column lifts its keys' readings: FM1_INPUT_LED_OK(col, rowbit)
  * answers 0 for a held key, whose column's LEDs then stay dark on the ticks that read it. */
 #ifndef FM1_INPUT_ANALOG
 #define FM1_INPUT_ANALOG(col, rowbit, v, driven) ((void)0)
@@ -458,6 +459,11 @@ static void fm1__row_release(uint32_t rowbit)
     FM1_PR(FM1_PA, FM1_OUT) &= ~m;
     FM1_PR(FM1_PA, FM1_HD0) &= ~m;
 }
+/* The probe's pull-up lights the LED of the key it reads, faintly: an open key (and not pressed at its last reading)
+ * is read in one probe frame of FM1_PROBE_IDLE only, for its baseline, so that the top row stays dark */
+#define FM1_PROBE_IDLE 32u
+static uint8_t fm1__probe_ph;                      /* the probe frames, counted: the open keys' turn at 0 */
+static uint8_t fm1__probe_held;                    /* bit n: column n's key pressed at its last reading */
 /* PA10 (the LED line of row PA6): an input with a pull-up for the probe, an output again after */
 static void fm1__pa10_probe(int on)
 {
@@ -484,9 +490,14 @@ static void fm1__an_take(void)
     fm1_an.driven = fm1_an.probing = 0;
     if (fm1_adc_done()) {
         uint32_t v = fm1_adc_take();
-        if (probing)
-            FM1_INPUT_PROBE(fm1_an.col, fm1_an.rowbit, v, (fm1_in.raw[fm1_an.col] >> fm1_an.rowbit) & 1u);
-        else if (fm1_an.rowbit)
+        if (probing) {
+            uint32_t pressed = (fm1_in.raw[fm1_an.col] >> fm1_an.rowbit) & 1u;
+            if (pressed)
+                fm1__probe_held |= (uint8_t)(1u << fm1_an.col);
+            else
+                fm1__probe_held &= (uint8_t)~(1u << fm1_an.col);
+            FM1_INPUT_PROBE(fm1_an.col, fm1_an.rowbit, v, pressed);
+        } else if (fm1_an.rowbit)
             FM1_INPUT_ANALOG(fm1_an.col, fm1_an.rowbit, v, driven);
         else
             fm1_an.master = (uint16_t)v;
@@ -500,7 +511,10 @@ static void fm1__an_start(uint32_t n, uint32_t lit)
 {
     uint32_t ch, rowbit;
     if (fm1_an.phase == 2u) {                      /* the probe frame: the top row through PA10, keys only */
-        if (n >= FM1_PROBE_COLS) {
+        if (n == 0u)
+            fm1__probe_ph = (uint8_t)(fm1__probe_ph + 1u >= FM1_PROBE_IDLE ? 0u : fm1__probe_ph + 1u);
+        if (n >= FM1_PROBE_COLS ||
+            (fm1__probe_ph && !((fm1_in.raw[n] >> 2) & 1u) && !((fm1__probe_held >> n) & 1u))) {
             fm1__led_lines(lit);
             return;
         }

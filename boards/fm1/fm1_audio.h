@@ -10,6 +10,7 @@
  *                 if (p & FM1_AUDIO_HALF) { fill fm1_audio_free_half();
  *                                           fm1_audio_ack_half(); }
  *   fm1_audio_stop()      DMA off (crash screen, UBOOT): no looping buzz
+ *   fm1_audio_line(on)    PC6, the codec's line fm1_audio_init raises once the audio runs: low, the output quiet
  */
 #pragma once
 #include <stdint.h>
@@ -87,3 +88,4 @@ FM1_INLINE void fm1_audio_ack_aux(uint8_t p)   /* the other three pendings */
 FM1_INLINE uint32_t fm1_audio_free_half(void) { return ((FM1_ALNK_CON0 >> 15) & 1u) ^ 1u; }   /* 0 / 1 */
 FM1_INLINE void fm1_audio_ack_half(void) { FM1_ALNK_CON2 |= 0x08u; }
 FM1_INLINE void fm1_audio_stop(void) { FM1_ALNK_CON0 &= ~0x800u; }
+FM1_INLINE void fm1_audio_line(int on) { fm1__pc_out(6, on); }
