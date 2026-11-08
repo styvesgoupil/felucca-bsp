@@ -9,7 +9,19 @@ static int fails;
 
 int main(void)
 {
+    /* the parts an FM-1 ships with; any other id is refused (RAM only) */
+    CHECK(fm1_flash_known(0x856014u));                              /* Puya P25Q80, the first FM-1s */
+    CHECK(fm1_flash_known(0xB36014u));                              /* UC25HQ80, FM-1s since autumn 2026 */
+    CHECK(fm1_flash_known(FM1_FLASH_PUYA) && fm1_flash_known(FM1_FLASH_UC25HQ80));
+    CHECK(!fm1_flash_known(0xEF4014u));                             /* a Winbond 1 MiB: not an FM-1's */
+    CHECK(!fm1_flash_known(0x856015u));                             /* the Puya's maker, another size */
+    CHECK(!fm1_flash_known(0xB36015u));
+    CHECK(!fm1_flash_known(0x146085u));                             /* the bytes the wrong way round */
+    CHECK(!fm1_flash_known(0x85601400u));                           /* a fourth byte: not a 3-byte id */
+    CHECK(!fm1_flash_known(0));                                     /* fl_jedec_ram's 0: it could not start */
+    CHECK(!fm1_flash_known(0xFFFFFFu));                             /* no part answered */
     CHECK(fm1_flash_size_from_jedec(0x856014u) == 0x100000u);      /* the stock Puya 1 MiB */
+    CHECK(fm1_flash_size_from_jedec(0xB36014u) == 0x100000u);      /* the UC25HQ80, 1 MiB too */
     CHECK(fm1_flash_size_from_jedec(0xEF4016u) == 0x400000u);      /* Winbond 4 MiB */
     CHECK(fm1_flash_size_from_jedec(0xEF4018u) == 0x1000000u);     /* 16 MiB */
     CHECK(fm1_flash_size_from_jedec(0xC84019u) == 0x2000000u);     /* 32 MiB */

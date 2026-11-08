@@ -372,7 +372,7 @@ static void app_main(void)
     uint32_t knob_w = ~0u, batt_w = ~0u;            /* the bars' widths on the screen (~0: not drawn yet) */
     {
         uint32_t f = irq_save();
-        flash_ok = FL_FAR(fl_jedec_ram)() == 0x856014u;   /* the 1 MiB part every FM-1 has */
+        flash_ok = fm1_flash_known(FL_FAR(fl_jedec_ram)());   /* a 1 MiB part an FM-1 ships with */
         irq_restore(f);
         if (flash_ok)
             ota_boot_cleanup();                 /* what an interrupted update left behind */

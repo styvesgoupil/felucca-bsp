@@ -1,7 +1,16 @@
 /* SPDX-License-Identifier: MPL-2.0
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
-/* Expanded flash, EXPERIMENTAL: what to do when the FM-1's SOIC-8 flash (stock: a 1 MiB part, JEDEC 85 60 14) is
- * replaced by a larger one. Pure logic, no registers: it decides the size and where the extra room is. The
+/* The FM-1's flash parts by their JEDEC id, and expanded flash. Pure logic, no registers (tests/flash_ext_test.c).
+ *
+ * fm1_flash_known(id): a part an FM-1 ships with, the one a firmware may erase and program (its store, an update).
+ * Both are 1 MiB SPI NOR and take the standard commands fm1_flash.h sends (06 02 05 0B 20 35 9F):
+ *   85 60 14  Puya P25Q80, the first FM-1s
+ *   B3 60 14  UC25HQ80, FM-1s sold since autumn 2026
+ * Any other id: the firmware runs from RAM alone (nothing saved, no update over USB-MIDI; the chip's own update
+ * mode still works, it never asks).
+ *
+ * Expanded flash, EXPERIMENTAL: what to do when the FM-1's SOIC-8 flash (stock: a 1 MiB part above) is
+ * replaced by a larger one. It decides the size and where the extra room is. The
  * read/erase/program entry points stay those of fm1_flash.h; they only need the limit passed in.
  *
  * Standard SPI NOR (Winbond, GigaDevice, Puya, Macronix, ...) puts the capacity in the last JEDEC byte as
@@ -16,8 +25,16 @@
 #pragma once
 #include <stdint.h>
 
+#define FM1_FLASH_PUYA       0x856014u       /* Puya P25Q80: the first FM-1s */
+#define FM1_FLASH_UC25HQ80   0xB36014u       /* UC25HQ80: FM-1s sold since autumn 2026 */
 #define FM1_FLASH_STOCK_SIZE 0x100000u       /* 1 MiB: the region the stock layout lives in */
 #define FM1_FLASH_MAX_3BYTE  0x1000000u      /* 16 MiB */
+
+/* 1 for a part an FM-1 ships with (JEDEC id as fl_jedec_ram returns it: mfr << 16 | type << 8 | capacity) */
+static inline int fm1_flash_known(uint32_t id)
+{
+    return id == FM1_FLASH_PUYA || id == FM1_FLASH_UC25HQ80;
+}
 
 /* bytes for a JEDEC id (mfr << 16 | type << 8 | capacity code), 0 when it is not a standard NOR capacity code */
 static inline uint32_t fm1_flash_size_from_jedec(uint32_t id)
