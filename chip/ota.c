@@ -3,7 +3,15 @@
 /* M-UPGRADE entry: "step 1 lite".
  *
  * The updater talks SysEx (F0 pack7(00 59 cmd len24 body chk) F7):
- *   cmd 0x11  handshake -> we answer our package identity (FELUCCA_ID)
+ *   cmd 0x11  handshake -> we answer our package identity (FELUCCA_ID), 27 bytes, the text then zeros: to the
+ *             plain query (no body: M-UPGRADE's) its name, '_' and the first three digits only ("FM-1_6010000"
+ *             -> "FM-1_601"), because M-UPGRADE 3.11 takes NAME_ and 1-3 digits and refuses the rest ("Invalid
+ *             device identity"); to the query with the one-byte body 01 the whole identity, version included
+ *             (the installers ask so when the plain answer is NAME_ and three digits; the stock firmware, the
+ *             update loader and builds before this don't answer it, so they keep the plain answer). The scheme
+ *             is PERF-1's (deamonSLINKY/PERF-1 775106b). The update loader (FELUCCA_LOADER) answers the plain
+ *             query only, with its whole identity ("ota-FM-1_900" passes M-UPGRADE 3.11). A host reads the
+ *             text up to its first zero
  *   F0 22 24 35 7F F7  upgrade -> ota_session(): pull parts of the package
  *     with cmd 0x30 read requests, check them, stage the package's update
  *     loader at 0xE0000 (outside Felucca's store), ask 0xE0000000 ("success"),
@@ -22,13 +30,26 @@
  *   ota_show(step, code)       progress / result for the screen
  *   ota_commit(parm)           write RAM record + reset (never returns on hardware)
  */
-#define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB */
+#ifdef FL_BOARD_MAP
+/* a board with its own flash map (boards/smk37) stages in its own window, and an app on it must name its layout and
+ * its update record, or this would stage over its store at the FM-1's 0xE0000 and take another board's package (the
+ * update loader, FELUCCA_LOADER or a board's LDR_LAYOUT, stages nothing: its own check is ldr_core.c's 2a) */
+#ifndef OTA_AREA
+#define OTA_AREA FL_OTA_LO
+#endif
+#if !defined(FELUCCA_LOADER) && !defined(LDR_LAYOUT) && (!defined(OTA_BOARD_FL_LEN) || !defined(OTA_BOARD_RT_OFF) || !defined(OTA_BOARD_RT_LEN) || \
+    !defined(OTA_BOARD_USR_LO) || !defined(OTA_BOARD_USR_LEN) || !defined(OTA_PARM_ID))
+#error "chip/ota.c on a board's own flash map: define OTA_BOARD_FL_LEN, OTA_BOARD_RT_*, OTA_BOARD_USR_* and OTA_PARM_ID"
+#endif
+#endif
+#ifndef OTA_AREA
+#define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB (the FM-1's; a board's fm1_flash.h FL_OTA_LO) */
+#endif
 #define OTA_AREA_LEN 0x5000u
 #define OTA_RES (OTA_AREA + OTA_AREA_LEN - 0x100u)  /* 0xE4F00 = 4K boundary - 256: SPL scan */
-#define OTA_LDR_HCRC 0xEBAAu                     /* official update loader (usb_hid_ota.bin) */
-#define OTA_LDR_DCRC 0x5881u
-#define OTA_LDR_LEN 0x4DE1u
-#define OTA_FRAME_MAX 640u                       /* 512-B response = 605 wire bytes */
+#ifndef OTA_FRAME_MAX
+#define OTA_FRAME_MAX 640u                       /* 512-B response = 605 wire bytes (the loader: a 4 KiB one) */
+#endif
 
 static int ota_wire_send(const uint8_t *p, uint32_t n);
 static int ota_frame_get(const uint8_t **p, uint32_t *n);
@@ -59,13 +80,18 @@ static uint32_t ota_crc16(const uint8_t *p, uint32_t n, uint32_t c)   /* poly 0x
     return c;
 }
 
-static void ota_jl_enc(uint8_t *p, uint32_t n)   /* UFW header cipher, key 0xFFFF */
+static uint32_t ota_jl_enc_k(uint8_t *p, uint32_t n, uint32_t k)   /* JieLi ENC from key k; -> the next key */
 {
-    uint32_t k = 0xFFFFu;
     while (n--) {
         *p++ ^= (uint8_t)k;
         k = ((k << 1) ^ (k & 0x8000u ? 0x1021u : 0u)) & 0xFFFFu;
     }
+    return k;
+}
+
+static void ota_jl_enc(uint8_t *p, uint32_t n)   /* UFW header cipher, key 0xFFFF */
+{
+    ota_jl_enc_k(p, n, 0xFFFFu);
 }
 
 /* 8-to-7, LSB first */
@@ -103,6 +129,13 @@ static uint32_t ota_unpack7(const uint8_t *in, uint32_t n, uint8_t *out, uint32_
     return o;
 }
 
+#ifndef OTA_PARM_ID
+#define OTA_PARM_ID "ota-FM-1_015"                /* the update record's identity (a board may name its own) */
+#endif
+_Static_assert(sizeof OTA_PARM_ID <= 64u, "OTA_PARM_ID: 63 characters at most (the record's identity, bytes 8..71)");
+#ifdef OTA_BOARD_FL_LEN
+_Static_assert(OTA_BOARD_RT_LEN <= 512u, "OTA_BOARD_RT_LEN: the region table is read whole into ota_stage's 512 bytes");
+#endif
 static uint8_t ota_msg[8 + 32], ota_wire[2 + 48];
 static uint8_t ota_dec[OTA_FRAME_MAX];           /* decoded host message */
 
@@ -126,13 +159,33 @@ static int ota_send_msg(uint32_t cmd, const uint8_t *body, uint32_t n)   /* n <=
     return ota_wire_send(ota_wire, w);
 }
 
-static void ota_reply_identity(void)
+/* the flash's JEDEC ID for the identity reply (a firmware defines it before including this file: the ID it read at
+ * boot), 0: not read */
+#ifndef OTA_FLASH_ID
+#define OTA_FLASH_ID() 0u
+#endif
+_Static_assert(sizeof FELUCCA_ID <= 24u, "FELUCCA_ID: 23 characters at most (the JEDEC ID follows at byte 24)");
+/* full 0: the name, '_' and three digits (M-UPGRADE 3.11's limit); 1: the whole identity. The loader's is whole */
+static void ota_reply_identity(int full)
 {
     static const char ID[] = FELUCCA_ID;         /* == the package marker string */
     uint8_t id[27];
-    uint32_t i;
+    uint32_t i, n = sizeof ID - 1u, j = OTA_FLASH_ID();
+#ifndef FELUCCA_LOADER
+    if (!full) {
+        for (i = 0; i < n && ID[i] != '_'; i++)
+            ;
+        if (i + 4u < n)
+            n = i + 4u;                          /* "FM-1_6010000" -> "FM-1_601"; "FM-1_600" stays */
+    }
+#else
+    (void)full;
+#endif
     for (i = 0; i < sizeof id; i++)
-        id[i] = i < sizeof ID - 1u ? (uint8_t)ID[i] : 0;
+        id[i] = i < n ? (uint8_t)ID[i] : 0;
+    id[24] = (uint8_t)(j >> 16);                 /* bytes 24..26: the JEDEC ID (installers read the text up to its */
+    id[25] = (uint8_t)(j >> 8);                  /* first 0; ID is shorter than 24) */
+    id[26] = (uint8_t)j;
     ota_send_msg(0x11, id, sizeof id);
 }
 
@@ -154,13 +207,29 @@ static uint32_t ota_take(void)
     return d;
 }
 
+/* the decoded frame (d: its length) a handshake? 1 the plain query, 2 the one with the body 01 (not the loader's),
+ * 0 neither */
+static int ota_hs(uint32_t d)
+{
+    if (d < 7u || ota_dec[2] != 0x11)
+        return 0;
+    if (d == 7u)
+        return 1;
+#ifndef FELUCCA_LOADER
+    if (d == 8u && ota_dec[6] == 1u)
+        return 2;
+#endif
+    return 0;
+}
+
 /* main loop, outside a session: answer handshakes. Returns the frame's decoded length (0: none), the frame in
  * ota_dec, for a firmware's own commands in the same framing (cmd ota_dec[2], the body from ota_dec + 6) */
 static uint32_t ota_service(void)
 {
     uint32_t d = ota_take();
-    if (d == 7u && ota_dec[2] == 0x11)
-        ota_reply_identity();
+    int hs = ota_hs(d);
+    if (hs)
+        ota_reply_identity(hs == 2);
     return d;
 }
 
@@ -187,8 +256,8 @@ static int ota_read(uint32_t addr, uint8_t *dst, uint32_t len)
             d = ota_take();
             if (!d)
                 continue;
-            if (d == 7u && ota_dec[2] == 0x11) {
-                ota_reply_identity();
+            if (ota_hs(d)) {
+                ota_reply_identity(ota_hs(d) == 2);
                 continue;
             }
             if (d == len + 15u && ota_dec[2] == 0x30 && ota_rd24(ota_dec + 3) == len + 8u &&
@@ -208,6 +277,52 @@ static int ota_memeq(const uint8_t *a, const uint8_t *b, uint32_t n)
         if (*a++ != *b++)
             return 0;
     return 1;
+}
+
+/* flash.bin's boot area [0, 0x4000), which a writer other than Felucca's puts on the flash: a broken one is the
+ * failure only the USB_KEY dongle mends. It must be one the ROM boots: the flash header and the boot record at
+ * +0x20 (each ENC 0xFFFF, CRC16), the boot file at 0xA0 a single-bank BANKCB container (its 16-byte header and its
+ * payload each ciphered from their own start) loaded at 0x01C02000, the header's, the payload's and the record's
+ * CRCs right; a container that names its board (m-bootloader: "AC79BLID" + the board at payload +0x40) names the
+ * FM-1's. Any bootloader so made: M-VAVE's of every version, m-bootloader. 0 valid, -5 not, -4 read */
+static int ota_boot_valid(uint32_t fl_off, uint32_t fl_len, uint8_t *b)
+{
+    uint32_t i, n, k = 0xFFFFu, len, dcrc, pwant = 0, pcrc = 0, fcrc = 0;
+    if (fl_len < 0x4000u)
+        return -5;
+    if (ota_read(fl_off, b, 64))
+        return -4;
+    ota_jl_enc(b, 32);
+    ota_jl_enc(b + 32, 32);
+    if (ota_crc16(b + 2, 30, 0) != ota_rd16(b) || ota_crc16(b + 34, 30, 0) != ota_rd16(b + 32) ||
+        ota_rd32(b + 36) != 0xA0u || b[44] != 0u)
+        return -5;
+    dcrc = ota_rd16(b + 34);
+    len = ota_rd32(b + 40);
+    if (len < 16u + 0x50u || len > 0x4000u - 0xA0u)
+        return -5;
+    for (i = 0; i < len; i += n) {
+        uint32_t h = 0;
+        n = len - i > 512u ? 512u : len - i;
+        if (ota_read(fl_off + 0xA0u + i, b, n))
+            return -4;
+        if (!i) {                                           /* the container's header */
+            ota_jl_enc(b, 16);
+            if (ota_crc16(b, 14, 0) != ota_rd16(b + 14) || ota_rd16(b) != 1u || ota_rd16(b + 2) + 16u != len ||
+                ota_rd32(b + 4) != 0x01C02000u || ota_rd32(b + 8) != 16u)
+                return -5;
+            pwant = ota_rd16(b + 12);
+            fcrc = ota_crc16(b, 16, 0);
+            h = 16;
+        }
+        k = ota_jl_enc_k(b + h, n - h, k);
+        pcrc = ota_crc16(b + h, n - h, pcrc);
+        fcrc = ota_crc16(b + h, n - h, fcrc);
+        if (!i && ota_memeq(b + 16 + 0x40, (const uint8_t *)"AC79BLID", 8) &&
+            !ota_memeq(b + 16 + 0x48, (const uint8_t *)"fm1", 4))
+            return -5;                                      /* another board's */
+    }
+    return pcrc == pwant && fcrc == dcrc ? 0 : -5;
 }
 
 /* JLFS head "LOADER.BIN" in front of the staged loader (vm_update_defrag), written last */
@@ -260,17 +375,23 @@ static int ota_ufw(uint8_t *hdr, uint32_t *fl_off, uint32_t *fl_len, uint32_t *o
 
 static int ota_stage(void)                       /* steps 1..6; 0 = host said success */
 {
-    static uint8_t hdr[0x400], b[512], mine[512];
-    uint32_t i, n, ota_off, ota_len, fl_off, fl_len, c, len, own, official;
+    static uint8_t hdr[0x400], b[512];
+    uint32_t i, n, ota_off, ota_len, fl_off, fl_len, c, len, own;
     int rc;
     /* 1. UFW header + entry list */
     ota_show(1, 0);
     if ((rc = ota_ufw(hdr, &fl_off, &fl_len, &ota_off, &ota_len)) != 0)
         return rc;
-    if (!fl_off || !ota_off)
+    if (!ota_off)
         return -3;
-    /* 2. which loader: the official one (known CRCs; it rewrites the whole flash.bin
-     *    including the head) or Felucca's own (app area only, checks the chip key) */
+#ifdef OTA_BOARD_FL_LEN
+    /* a board with its own layout: a package laid out for another board is refused before anything is touched. The
+     * FM-1's official package has the SMK-37's boot head and loader, and its loader would erase the SMK's calibration */
+    if (fl_len != OTA_BOARD_FL_LEN)
+        return -15;
+#endif
+    /* 2. the package's writer (any: M-VAVE's, Felucca's, m-bootloader's installer, another firmware's), well
+     *    made: its JLFS head and inner head right, loaded where the SPL runs it, small enough to stage */
     if (ota_read(ota_off, b, 512))
         return -6;
     len = ota_rd32(b + 8);
@@ -278,19 +399,31 @@ static int ota_stage(void)                       /* steps 1..6; 0 = host said su
         ota_len != len + 0x20u || len > OTA_AREA_LEN - 0x200u || ota_crc16(b + 0x22, 30, 0) != ota_rd16(b + 0x20) ||
         ota_rd32(b + 0x20 + 8) != 0x01C0A800u)
         return -7;
-    official = ota_rd16(b) == OTA_LDR_HCRC && ota_rd16(b + 2) == OTA_LDR_DCRC && len == OTA_LDR_LEN;
     for (i = 0x48, own = 0; i + 16u <= 0x48u + 64u && !own; i++)    /* first LZ4 literals: crt0_ldr.S */
         own = ota_memeq(b + i, (const uint8_t *)"FELUCCA-LOADER-1", 16) && ota_rd32(b + 0x20 + 4) <= 0x14000u;
-    if (!official && !own)
-        return -7;
-    if (official) {                    /* the official loader writes the head: it must equal ours */
+    /* 3. a flash image with it: Felucca's writer never writes its head (the app area only); any other may,
+     *    so its boot area must be a bootable one for the FM-1 (no flash.bin: the writer brings its own) */
+    if (fl_off && !own) {
         ota_show(2, 0);
-        for (i = 0; i < 0x4000u; i += 512u) {
-            if (ota_read(fl_off + i, b, 512) || ota_fread(i, mine, 512))
+        if ((rc = ota_boot_valid(fl_off, fl_len, b)) != 0)
+            return rc;
+#ifdef OTA_BOARD_FL_LEN
+        /* another writer rewrites the region table too: it must be this flash's (both enciphered alike, so equal bytes
+         * mean an equal table), and its resources must go where this board keeps them */
+        {
+            static uint8_t rt[OTA_BOARD_RT_LEN];
+            uint32_t nent = ota_rd16(hdr + 8);
+            if (ota_read(fl_off + OTA_BOARD_RT_OFF, b, OTA_BOARD_RT_LEN) || ota_fread(OTA_BOARD_RT_OFF, rt, OTA_BOARD_RT_LEN))
                 return -4;
-            if (!ota_memeq(b, mine, 512))
-                return -5;
+            if (!ota_memeq(b, rt, OTA_BOARD_RT_LEN))
+                return -16;
+            for (i = 0; i < nent && i < 11u; i++) {
+                const uint8_t *e = hdr + 0x40 + i * 0x50u;
+                if (ota_rd16(e) == 50u && (ota_rd32(e + 0x1C) != OTA_BOARD_USR_LO || ota_rd32(e + 0x20) != OTA_BOARD_USR_LEN))
+                    return -17;
+            }
         }
+#endif
     }
     /* 4. stage the package's loader: erase, body, verify, head last */
     ota_show(3, 0);
@@ -358,8 +491,8 @@ static int ota_session(void)
     ota_wr16(parm + 2, 0x5A0Du);
     ota_wr16(parm + 4, 0x5A01u);
     ota_wr16(parm + 6, 0x5441u);
-    for (i = 0; i < 12u; i++)
-        parm[8 + i] = (uint8_t)"ota-FM-1_015"[i];    /* the loader's own USB identity */
+    for (i = 0; i < sizeof OTA_PARM_ID - 1u; i++)
+        parm[8 + i] = (uint8_t)OTA_PARM_ID[i];       /* the loader's own USB identity */
     ota_wr32(parm + 72, OTA_AREA);
     ota_wr16(parm, ota_crc16(parm + 2, 78, 0));
 #if FELUCCA_OTA_DRYRUN

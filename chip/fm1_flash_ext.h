@@ -7,11 +7,12 @@
  *   85 60 14  Puya P25Q80, the first FM-1s
  *   B3 60 14  UC25HQ80, FM-1s sold since autumn 2026
  * Any other id: the firmware runs from RAM alone (nothing saved, no update over USB-MIDI; the chip's own update
- * mode still works, it never asks).
+ * mode still works, it never asks). A board with its own parts says so in its map (FL_JEDEC_OK, boards/smk37).
  *
  * Expanded flash, EXPERIMENTAL: what to do when the FM-1's SOIC-8 flash (stock: a 1 MiB part above) is
- * replaced by a larger one. It decides the size and where the extra room is. The
- * read/erase/program entry points stay those of fm1_flash.h; they only need the limit passed in.
+ * replaced by a larger one. Pure logic, no registers: it decides the size and where the extra room is. The
+ * read/erase/program entry points stay those of fm1_flash.h: set FM1_FLASH_SIZE and
+ * FM1_FLASH_WRITE_REGIONS before inclusion, then check the detected size before allowing writes.
  *
  * Standard SPI NOR (Winbond, GigaDevice, Puya, Macronix, ...) puts the capacity in the last JEDEC byte as
  * log2(bytes): 0x14 = 1 MiB, 0x15 = 2, 0x16 = 4, 0x17 = 8, 0x18 = 16 MiB, 0x19 = 32 MiB.

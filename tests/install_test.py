@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import fm1_install as I  # noqa: E402
 
-I.DELAY.update(open=0, start=0.01, reply=0, loader=0.01, reboot=0.01, retry=0.02, poll=0.05, hs=0.1,
+I.DELAY.update(open=0, start=0.01, start_fast=0.01, fast_hello=0.05, reply=0, loader=0.01, reboot=0.01, retry=0.02, poll=0.05, hs=0.1, hs_full=0.1,
                idle_check=0.4, idle_write=0.4, wait_loader=2, wait_reboot=2)
 failed = 0
 
@@ -67,10 +67,11 @@ class FakeFM1:
     """a MIDI backend with one FM-1 on it"""
 
     def __init__(self, image, identity="FM-1_015", name="FM-1", unplug_after=None, after_write="FM-1_900",
-                 stall_after=None, bad_addr=None):
-        self.image, self.unplug_after, self.after_write = image, unplug_after, after_write
+                 stall_after=None, bad_addr=None, new_ota=(), jedec=0, loader="ota-FM-1_900"):
+        self.image, self.unplug_after, self.after_write, self.loader = image, unplug_after, after_write, loader
+        self.new_ota, self.jedec = set(new_ota), jedec   # identities whose ota.c cuts the plain answer; PR #29's bytes
         self.stall_after, self.bad_addr = stall_after, bad_addr
-        self.served = self.bad = self.upgrades = 0
+        self.served = self.bad = self.upgrades = self.hs_full = 0
         self.sent, self.links, self.gen, self.lock = [], [], 0, threading.Lock()
         self.boot(identity, name)
 
@@ -97,10 +98,19 @@ class FakeFM1:
             if link.gen == self.gen and not link.closed:
                 link.q.put(bytes(pkt))
 
+    def ident(self, text):
+        b = bytearray(text.encode() + bytes(27 - len(text)))
+        b[24:27] = self.jedec.to_bytes(3, "big")
+        self.tx(b"\xF0" + I.pack7(bytes([0, 0x59, 0x11, 27, 0, 0]) + b + bytes([~sum(b) & 0xFF])) + b"\xF7")
+
     def rx(self, d):
+        new = self.identity in self.new_ota       # chip/ota.c from M-UPGRADE 3.11's fix on: NAME_ + 3 digits to HS_QUERY
         if d == I.HS_QUERY:
-            t = self.identity.encode()
-            self.tx(b"\xF0" + I.pack7(bytes([0, 0x59, 0x11, 0, 0, 0]) + t + bytes(28 - len(t))) + b"\xF7")
+            self.ident(self.identity[:self.identity.index("_") + 4] if new else self.identity)
+        elif d == I.HS_FULL:
+            self.hs_full += 1
+            if new:
+                self.ident(self.identity)
         elif d == I.UPGRADE:
             self.upgrades += 1
             first = self.bad_addr if self.bad_addr is not None else 0
@@ -123,7 +133,7 @@ class FakeFM1:
             if self.stall_after and self.served >= self.stall_after:
                 return
             if addr == I.FINISH_CHECK:
-                threading.Timer(0.05, self.boot, ("ota-FM-1_900", "Felucca Update")).start()
+                threading.Timer(0.05, self.boot, (self.loader, "Felucca Update")).start()
             elif addr == I.FINISH_WRITE:
                 threading.Timer(0.05, self.boot, (self.after_write, "Felucca")).start()
             else:
@@ -178,6 +188,13 @@ def wire():
        and ~sum(u[6:17]) & 0xFF == u[17], "response: header, address, data, checksum")
     raw = package("FM-1_906")
     ok(I.product_of(raw) == "FM-1_906" and len(I.logical_image(raw)) == len(raw) - 20, "product_of / logical_image (synthetic)")
+    ok(I.HS_FULL == b"\xF0" + I.pack7(bytes([0, 0x59, 0x11, 1, 0, 0, 1, 0xFE])) + b"\xF7"
+       and I.unpack7(I.HS_FULL[1:-1])[:8] == bytes([0, 0x59, 0x11, 1, 0, 0, 1, 0xFE]),
+       "HS_FULL: 00 59 11, length 1, body 01, checksum FE")
+    b = bytearray(b"FM-1_6010000" + bytes(15))
+    b[24:27] = b"\xB3\x60\x14"                   # felucca-bsp#29: the flash's JEDEC id after the text
+    i = I.parse_identity(b"\xF0" + I.pack7(bytes([0, 0x59, 0x11, 27, 0, 0]) + b + bytes([~sum(b) & 0xFF])) + b"\xF7")
+    ok(i and i.text == "FM-1_6010000" and i.version == 6010000, "parse_identity: the text up to its first zero (#29's bytes after it)")
 
 
 def installs():
@@ -193,6 +210,11 @@ def installs():
     dev = FakeFM1(image, identity="ota-FM-1_900", name="Felucca Update")
     rc, out, err = cli([p, "--yes"], dev)
     ok(rc == 0 and dev.bad == 0 and dev.upgrades == 1 and "update mode" in out, "install: device already in update mode -> finishes the write")
+    ok(dev.sent.count(I.FAST_HELLO) == 1 and "classic install" in out,
+       "install: the fast install's hello, unanswered (an older loader): the classic install")
+    dev = FakeFM1(image, identity="ota-FM-1_900", name="Felucca Update")
+    rc, out, err = cli([p, "--yes", "--classic"], dev)
+    ok(rc == 0 and dev.bad == 0 and I.FAST_HELLO not in dev.sent, "install --classic: no hello")
 
     dev = FakeFM1(image)
     rc, out, err = cli([p], dev, answer=False)
@@ -204,7 +226,29 @@ def installs():
 
     dev = FakeFM1(image, identity="ota-FM-1_900", name="Felucca Update")
     rc, out, err = cli(["--info"], dev)
-    ok(rc == 0 and "update loader" in out, "--info: device in update mode")
+    ok(rc == 0 and "update loader" in out and dev.hs_full == 0, "--info: device in update mode (never asked with 01)")
+
+    # M-UPGRADE 3.11 takes NAME_ and 1-3 digits: chip/ota.c answers HS_QUERY with FM-1_601, HS_FULL with the whole
+    rawl = package("FM-1_6010100")
+    dev = FakeFM1(I.logical_image(rawl), identity="FM-1_6010000", name="FM-1", after_write="FM-1_6010100",
+                  new_ota={"FM-1_6010000", "FM-1_6010100"}, jedec=0xB36014)
+    rc, out, err = cli([pkgfile("long.fwsc", rawl), "--yes"], dev)
+    ok(rc == 0 and dev.bad == 0 and "device:  FM-1_6010000" in out and "done: the FM-1 runs FM-1_6010100" in out,
+       "install: FM-1_601 to the plain query, the whole identity to HS_FULL")
+    rawl = package("FM-1_6010000")
+    dev = FakeFM1(I.logical_image(rawl), identity="FM-1_6000900", name="FM-1", after_write="FM-1_6010000",
+                  new_ota={"FM-1_6010000"})
+    rc, out, err = cli([pkgfile("long.fwsc", rawl), "--yes"], dev)
+    ok(rc == 0 and dev.bad == 0 and "done: the FM-1 runs FM-1_6010000" in out,
+       "install: from a build before it (whole identity to the plain query) to one after")
+    dev = FakeFM1(image, identity="FM-1_600", name="FM-1", new_ota={"FM-1_600"})
+    rc, out, err = cli(["--info"], dev)
+    ok(rc == 0 and "FM-1_600" in out and dev.hs_full == 1, "--info: a dev build's FM-1_600, the same both ways")
+    dev = FakeFM1(image, identity="FM-1_015", name="FM-1")
+    t0 = time.monotonic()
+    rc, out, err = cli(["--info"], dev)
+    ok(rc == 0 and "FM-1_015" in out and dev.hs_full == 1 and time.monotonic() - t0 < 2,
+       "--info: the stock firmware doesn't answer HS_FULL: its plain answer")
 
 
 def errors():
@@ -253,11 +297,39 @@ def errors():
     ok(rc == 2 and "no update loader of this family" in err and dev.sent == [], "package without the loader marker -> exit 2, no MIDI")
     dev = FakeFM1(I.logical_image(package(marker=False)))
     rc, out, err = cli([plain, "--yes", "--force"], dev)
-    ok(rc == 0 and dev.bad == 0, "... installs with --force")
+    ok(rc == 0 and dev.bad == 0 and I.FAST_HELLO not in dev.sent,
+       "... installs with --force (no fast install's hello: not this family's loader)")
     rc, out, err = cli([pkgfile("short.fwsc", b"\0" * 100), "--yes"], FakeFM1(image))
     ok(rc == 2 and "too short" in err, "not a package -> exit 2")
     rc, out, err = cli([str(TMP / "missing.fwsc"), "--yes"], FakeFM1(image))
     ok(rc == 2, "missing file -> exit 2")
+
+
+def smk37():
+    """the SMK-37 (boards/smk37/, loader/ldr_smk37.h): packages "SMK-37 Pro_", "SMK-37 Elite_", "MKE-P37_", the
+    loader "ota-<model>_900"; its ports are found; a package goes only to its own model, both ways, nothing sent else"""
+    for product, port in (("SMK-37 Elite_1100", "Melodee SMK-37"), ("MKE-P37_1100", "MKE-P37")):
+        raw = package(product)
+        model = product.split("_")[0]
+        ok(I.product_of(raw) == product, f"product_of: {product}")
+        dev = FakeFM1(I.logical_image(raw), identity=f"{model}_1000", name=port, after_write=product,
+                      loader=f"ota-{model}_900")
+        rc, out, err = cli([pkgfile("smk.fwsc", raw), "--yes"], dev)
+        ok(rc == 0 and dev.bad == 0 and dev.upgrades == 2 and f"done: the FM-1 runs {product}" in out,
+           f"install: {model}'s package on its own keyboard (port {port!r}), through its loader")
+    elite = package("SMK-37 Elite_1100")
+    for ident, port, what in (("SMK-37 Pro_1100", "SMK-37 Pro", "an Elite package on a Pro"),
+                              ("FM-1_900", "FM-1", "an SMK-37 package on an FM-1"),
+                              ("ota-FM-1_900", "Felucca Update", "an SMK-37 package on an FM-1's update loader")):
+        dev = FakeFM1(I.logical_image(elite), identity=ident, name=port)
+        rc, out, err = cli([pkgfile("elite.fwsc", elite), "--yes"], dev)
+        ok(rc == 6 and dev.upgrades == 0 and "the package is for SMK-37 Elite_1100" in err, f"{what}: exit 6, nothing sent")
+    fm1 = package()
+    for ident, port, what in (("SMK-37 Elite_1100", "Melodee SMK-37", "an FM-1 package on an SMK-37"),
+                              ("ota-SMK-37 Elite_900", "Felucca Update", "an FM-1 package on an SMK-37's update loader")):
+        dev = FakeFM1(I.logical_image(fm1), identity=ident, name=port)
+        rc, out, err = cli([pkgfile("ok.fwsc", fm1), "--yes"], dev)
+        ok(rc == 6 and dev.upgrades == 0 and "the package is for FM-1_900" in err, f"{what}: exit 6, nothing sent")
 
 
 def against_js():
@@ -296,6 +368,7 @@ def official():
 wire()
 installs()
 errors()
+smk37()
 against_js()
 official()
 shutil.rmtree(TMP, ignore_errors=True)

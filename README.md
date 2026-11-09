@@ -9,16 +9,18 @@ Named after its first user, Felucca; it is not tied to that application.
 Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi. Product and company names
 belong to their owners.
 
-> **Experimental parts.** Some features here are **beta**: the second core (`chip/fm1_cpu1.*`) and expanded flash
-> (`chip/fm1_flash_ext.h`). Others are only a **concept** that does not run: BLE, USB host, a higher clock. None has run
-> on a device yet. What is established and what is not: [docs/EXPERIMENTAL.md](docs/EXPERIMENTAL.md). The safe test
-> firmware (`examples/hwtest/hwtest.bin`) contains none of them. Working Bluetooth MIDI and WiFi, on JieLi's own
+> **Experimental parts.** Some features here are **beta**: the second core (`chip/fm1_cpu1.*`), expanded flash
+> (`chip/fm1_flash_ext.h`) and the cache RAM (`chip/fm1_cache_ram.h`). USB MIDI host is ported from Melodee, where input has run on hardware;
+> this BSP port and its OUT path still need device validation. A higher clock remains a **concept**.
+> What is established and what is not: [docs/EXPERIMENTAL.md](docs/EXPERIMENTAL.md). The safe test
+> firmware (`examples/hwtest/hwtest.bin`) contains none of them. Bluetooth MIDI and WiFi, on JieLi's own
 > radio libraries, are in [fm1-base](https://github.com/charlesvestal/fm1-base), which builds on this repository.
 
 > **Licences: settled.** The files here are MPL-2.0. Leo Kuroshita confirmed it for the Felucca code he owns
 > ([#4](https://github.com/hugelton/felucca-bsp/issues/4)), and keremimo for his part of `chip/usb.c`
 > ([#3](https://github.com/hugelton/felucca-bsp/pull/3)). Details in [LICENSING.md](LICENSING.md) and
-> [NOTICE](NOTICE).
+> [NOTICE](NOTICE). The USB host port also has permission from Adrien Tibi (Recursive Field Instruments):
+> [Melodee #75](https://github.com/keremimo/melodee/pull/75#issuecomment-6384184014).
 
 > **Licence notes before you start**
 > - A fork of Felucca cannot move to MPL-2.0 by using this repository. To use another licence, start a new project and import this one: [Forks of Felucca](LICENSING.md#forks-of-felucca).
@@ -33,30 +35,44 @@ belong to their owners.
 | Device | Status |
 | --- | --- |
 | M-VAVE FM-1 | Supported. Used by Felucca. |
-| M-VAVE SMK-37 Elite | Planned. Not started. |
-| M-VAVE SMK-37 Pro | Planned. No board support yet. |
+| M-VAVE Galaxia | Supported (board code: audio, knobs, switches, jacks, LED). Used by [GalaxiaSDK](https://github.com/dhilowitz/GalaxiaSDK). |
+| M-VAVE SMK-37 Pro / Elite / MKE-P37 | Board layer (`boards/smk37/`): the matrix, LEDs, pads, faders, wheels, pedal, LCD, flash map, TRS out. Run on an Elite (keys, buttons, encoders, pads, faders, the panel); the rest not yet checked on a unit, the Pro and MKE-P37 untried; every fact marked. |
 
 "Planned" means the device is a target, not that it works. A device gets its own directory
 under `boards/` once someone has it running. Pin maps and other board facts are added only
 when they have been checked on a real unit.
+
+`boards/smk37/` was written ahead of a unit, from M. Geisler's analysis of the stock SMK-37 v016 firmware
+([fm1-to-smk37](https://github.com/genkigenki/fm1-to-smk37), its facts credited in each header, none of its code),
+under MPL-2.0 by Kerem Kilic (Ellic Studio), and has since run on an Elite: under
+[Saadet](https://github.com/keremimo/saadet) its keys with velocity, buttons, encoders, pads, faders, BANK buttons and
+panel work. Each fact is marked *verified* (on an Elite running Melodee, per that analysis) or *analysis*; the wheels,
+the pedal, the LEDs, the battery, the codec and TRS out are not yet checked on a unit by this layer, and no Pro or
+MKE-P37 has run it. The three models (Pro, Elite, MKE-P37) are the same hardware with their own package identities;
+fm1-base's `tools/build.py` builds for it with `board = "smk37"`.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
 | `chip/` | Registers, drivers and boot entry shared by the chip family; `libc.c` (the few routines a freestanding build needs); `ota.c` (the update session, which takes its hooks from the application); `fm1_perf.h` (cycle and stall counters) and `fm1_debug.h` (register access for development builds) |
-| `chip/usb.c` | The USB device: MIDI, serial and audio classes with the EP0 and poll code |
+| `chip/usb_host.c`, `chip/usb_host_desc.h` | Opt-in USB MIDI host: direct or one powered hub, MIDI input/output; [API and limits](docs/USB_HOST.md) |
+| `chip/usb.c` | The USB device: MIDI, serial and audio classes (audio in, and with `FELUCCA_UAC_OUT` audio out) with the EP0 and poll code |
+| `chip/fm1_sys.h`, `chip/fm1_guard.h` | Supply rails (VDC14 and SYSVDD at M-VAVE's levels), reboot and core reset; hardware guards (stack, write and fetch limits that end in the fault report), the stack floor, whether code runs in an interrupt |
 | `loader/` | The update loader (builds as a RAM image; it includes `chip/usb.c`, `chip/ota.c` and `chip/libc.c`) |
-| `boards/fm1/` | FM-1 wiring and drivers: LCD pins, key scan, ADC channels, audio codec lines |
-| `ble/` | **Concept, does not run yet.** A minimal BLE-MIDI sender over standard HCI; tested on a PC against a fake controller only ([ble/README.md](ble/README.md)) |
-| `examples/hwtest-ble/` | **Concept, does not run.** Glue between `ble/` and JieLi's radio controller, and a survey of what linking it needs; no firmware ([README](examples/hwtest-ble/README.md)) |
-| `docs/EXPERIMENTAL.md` | Second core, expanded flash, USB host, BLE, clock: what is established and what is not |
+| `boards/fm1/` | FM-1 wiring and drivers: ST7789 panel initialization and RGB565 transfers (`fm1_lcd.h`), key scan (with velocity and pressure from the keys, off by default: `fm1_input.h`), ADC channels, checked stereo Q23 audio DMA (`fm1_audio.h`), the headphone jack's switch (PB5: `fm1_jack.h`) |
+| `boards/galaxia/` | Galaxia (a guitar pedal, board PD49 V03) wiring and drivers in one header, `gx_board.h`: the stereo converter on ALNK0 (44,118 Hz), six knobs including a nine-detent selector, two footswitches, the input jack detects, the two-colour LED |
+| `boards/smk37/` | SMK-37 wiring and drivers, the same header names: the 595 chain's matrix with two-contact velocity, 18 buttons, 8 encoders, 19 LEDs in two commons (`fm1_input.h`), the three analog muxes (`fm1_adc.h`: pads, faders, wheels, pedal, battery), the LCD on its own SPI1 group and the pad LEDs' frame (`fm1_lcd_hw.h`), the 1 MiB flash map with its protected windows (`fm1_flash.h`, over `chip/fm1_flash.h`), the TRS jack as MIDI OUT (`fm1_uart.h`), the codec as the FM-1's, unmeasured (`fm1_audio.h`) |
+| `docs/BOARD_IO.md` | Panel API, pixel byte order and lifetime; audio sample/rate guarantees, buffer validation, stop/restart and underrun behavior |
+| `docs/EXPERIMENTAL.md` | Second core, expanded flash, USB host, clock: what is established and what is not |
+| `docs/FLASH.md` | Application write regions, flash API, interrupt preservation, CPU1 coordination and verification |
 | `docs/CPU.md` | What the CPU has been seen to do: 64-bit multiplies among 16-bit loads leave a register a bit off; keep them out of line |
-| `tools/` | Package builder (`fm1pkg.py`) and USB-MIDI installer (`fm1_install.py`) |
+| `tools/` | Package builder (`fm1pkg.py`), USB-MIDI installer (`fm1_install.py`), `fm1_rescue` and `get_sdk.sh` (JieLi's SDK, fetched and checked by hash) |
 | `examples/hwtest/` | Test firmware for a real FM-1: screen, knob, buttons, LEDs, USB serial. `hwtest.bin` is the safe image; `hwtest-exp.bin` adds the experimental parts |
 | `examples/felucca/` | Reference only: `ota_hw.c`, the hooks Felucca gives `ota.c`. Not built here |
 
-Headers include each other by file name. Build with `-Ichip -Iboards/fm1`. The loader builds from this tree with
+Headers include each other by file name. Build with `-Ichip -Iboards/fm1`, or `-Iboards/smk37 -Ichip` for the SMK-37
+(its `fm1_flash.h` shadows the chip's and includes it). The loader builds from this tree with
 the JieLi toolchain and gives the same image as it does inside Felucca.
 
 `tools/` has the package builder, the USB-MIDI installer and `fm1_rescue` (stock firmware back on an FM-1 that cannot
