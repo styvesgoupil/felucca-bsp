@@ -36,6 +36,7 @@ belong to their owners.
 | --- | --- |
 | M-VAVE FM-1 | Supported. Used by Felucca. |
 | M-VAVE Galaxia | Supported (board code: audio, knobs, switches, jacks, LED). Used by [GalaxiaSDK](https://github.com/dhilowitz/GalaxiaSDK). |
+| M-VAVE Pocket AMP | Board code for audio, buttons and panel, checked on a unit. Used by [Pendel](https://github.com/hugelton/Pendel); its update loader stays in pendel-bsp. |
 | M-VAVE SMK-37 Pro / Elite / MKE-P37 | Board layer (`boards/smk37/`): the matrix, LEDs, pads, faders, wheels, pedal, LCD, flash map, TRS out. Run on an Elite (keys, buttons, encoders, pads, faders, the panel); the rest not yet checked on a unit, the Pro and MKE-P37 untried; every fact marked. |
 
 "Planned" means the device is a target, not that it works. A device gets its own directory
@@ -62,6 +63,7 @@ fm1-base's `tools/build.py` builds for it with `board = "smk37"`.
 | `loader/` | The update loader (builds as a RAM image; it includes `chip/usb.c`, `chip/ota.c` and `chip/libc.c`) |
 | `boards/fm1/` | FM-1 wiring and drivers: ST7789 panel initialization and RGB565 transfers (`fm1_lcd.h`), key scan (with velocity and pressure from the keys, off by default: `fm1_input.h`), ADC channels, checked stereo Q23 audio DMA (`fm1_audio.h`), the headphone jack's switch (PB5: `fm1_jack.h`) |
 | `boards/galaxia/` | Galaxia (a guitar pedal, board PD49 V03) wiring and drivers in one header, `gx_board.h`: the stereo converter on ALNK0 (44,118 Hz), six knobs including a nine-detent selector, two footswitches, the input jack detects, the two-colour LED |
+| `boards/pocketamp/` | Pocket AMP audio input/output, buttons and panel. The board-specific update loader remains in [pendel-bsp](https://github.com/hugelton/pendel-bsp). |
 | `boards/smk37/` | SMK-37 wiring and drivers, the same header names: the 595 chain's matrix with two-contact velocity, 18 buttons, 8 encoders, 19 LEDs in two commons (`fm1_input.h`), the three analog muxes (`fm1_adc.h`: pads, faders, wheels, pedal, battery), the LCD on its own SPI1 group and the pad LEDs' frame (`fm1_lcd_hw.h`), the 1 MiB flash map with its protected windows (`fm1_flash.h`, over `chip/fm1_flash.h`), the TRS jack as MIDI OUT (`fm1_uart.h`), the codec as the FM-1's, unmeasured (`fm1_audio.h`) |
 | `docs/BOARD_IO.md` | Panel API, pixel byte order and lifetime; audio sample/rate guarantees, buffer validation, stop/restart and underrun behavior |
 | `docs/EXPERIMENTAL.md` | Second core, expanded flash, USB host, clock: what is established and what is not |
