@@ -27,7 +27,8 @@
  * FELUCCA_UAC_OUT=1 (with FELUCCA_UAC) adds a USB audio output too: the computer plays through the FM-1 (16-bit
  * stereo, 44.1 kHz, EP4 OUT isochronous adaptive). uac_service takes each packet into a ring (nested in the render
  * too); uac_play, after each render, adds it to the output, resampled to the I2S clock (~44,117.6 Hz): the ring's
- * fill steers the rate, so it neither runs dry nor overflows.
+ * fill steers the rate, so it neither runs dry nor overflows. uac_out_in tells the firmware it comes (its packets, its
+ * peak).
  * FELUCCA_USB_HOST=1 adds opt-in MIDI host mode; see docs/USB_HOST.md for the main-loop contract.
  * FELUCCA_MSC=1 adds a disk mode: usb_msc_switch(1) drops off the bus and comes back as a USB mass-storage device
  * (bulk-only transport, EP3 bulk in and out; nothing else: no MIDI, no audio) until usb_msc_switch(0). The poll
@@ -295,6 +296,7 @@ static struct {
     uint32_t pos;                /* the read position's fraction, Q16 */
     float err;                   /* the fill's distance from UO_TGT, smoothed (frames) */
     uint32_t pkts, frames, underruns, overruns, starts;
+    volatile uint32_t peak;      /* the loudest sample uac_play read since uac_out_in last asked, 0..32768 */
 } uo;
 #endif
 #if FELUCCA_UAC_48K
@@ -2120,7 +2122,7 @@ static void uo_service(void)                            /* an EP4 OUT packet int
  * the fill at a render's start is from UO_TGT (a frame's error: 1/32768 faster or slower) */
 static __attribute__((noinline)) void uac_play(int32_t *out, uint32_t n, uint32_t gain_q12)
 {
-    uint32_t r = uo_r, fill = uo_w - r, i, pos = uo.pos, step;
+    uint32_t r = uo_r, fill = uo_w - r, i, pos = uo.pos, step, pk;
     float g = (float)gain_q12 * (1.0f / 16.0f), adj;            /* 16-bit to 24-bit (x 256), x gain / 4096 */
     if (!uo.alt || !usb.config) {
         uo.go = 0;
@@ -2147,18 +2149,35 @@ static __attribute__((noinline)) void uac_play(int32_t *out, uint32_t n, uint32_
         return;
     }
     RING_PUBLISH();
+    pk = uo.peak;
     for (i = 0; i < n; i++) {
         uint32_t k = pos >> 16, a = uo_ring[(r + k) & (UO_N - 1u)], b = uo_ring[(r + k + 1u) & (UO_N - 1u)];
         float fr = (float)(pos & 0xFFFFu) * (1.0f / 65536.0f);
         float l = (float)(int16_t)a + ((float)(int16_t)b - (float)(int16_t)a) * fr;
         float rr = (float)(int16_t)(a >> 16) + ((float)(int16_t)(b >> 16) - (float)(int16_t)(a >> 16)) * fr;
+        int32_t ml = (int16_t)a, mr = (int16_t)(a >> 16);   /* (its level as sent, before the gain: uac_out_in) */
+        ml = ml < 0 ? -ml : ml;
+        mr = mr < 0 ? -mr : mr;
+        pk = (uint32_t)ml > pk ? (uint32_t)ml : pk;
+        pk = (uint32_t)mr > pk ? (uint32_t)mr : pk;
         out[2u * i] += (int32_t)(l * g);
         out[2u * i + 1u] += (int32_t)(rr * g);
         pos += step;
     }
+    uo.peak = pk;
     RING_PUBLISH();
     uo_r = r + (pos >> 16);
     uo.pos = pos & 0xFFFFu;
+}
+
+/* the computer's audio as it comes in, for the firmware (fm1-base's plat_usb_play_in): the packets taken so far (they
+ * move while its stream flows), and in *peak the loudest sample uac_play read since the last call, 0..32768 (as sent,
+ * before the gain; a block's landing between the read and the clear is lost: a meter's, no matter) */
+static inline uint32_t uac_out_in(uint32_t *peak)
+{
+    *peak = uo.peak;
+    uo.peak = 0;
+    return uo.pkts;
 }
 #endif
 
