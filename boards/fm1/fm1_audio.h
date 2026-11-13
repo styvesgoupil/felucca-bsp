@@ -15,6 +15,8 @@
  *   fm1_audio_init(buf, half_words, isr, prio) compatibility wrapper, assumes
  *                         capacity >= 2 * half_words; now returns status too.
  *                         isr = asm wrapper (fm1_isr.S) for FM1_IRQ_ALNK0
+ *   fm1_audio_start(buf, half_words, isr, prio) the start alone, after the checks; without the clock's only for an
+ *                         app that knows why it refused. fm1_audio_pll0(): PLL0 as that check reads it (0: unset)
  *   in the ISR:   p = fm1_audio_pending();  fm1_audio_ack_aux(p);
  *                 if (p & FM1_AUDIO_HALF) { fill fm1_audio_free_half();
  *                                           fm1_audio_ack_half(); }
@@ -84,20 +86,12 @@ static void fm1__pc_out(uint32_t bit, int v)   /* PC0 MCLK, PC1 BCLK, PC2 LRCK, 
     FM1_PR(FM1_PC, FM1_DIR) &= ~m;
 }
 
-__attribute__((warn_unused_result))
-FM1_INLINE int fm1_audio_init_checked(int32_t *buf, uint32_t buffer_words, uint32_t half_words,
-                                     uint32_t rate, void (*isr)(void), uint32_t prio)
+/* the start alone, after its checks (fm1_audio_init_checked's: the buffer, the rate, the IRQ, not busy, the clock);
+ * without the clock's only where the app knows why it refused (FRASIL card #163: PLL0 unset, an emulator's).
+ * IRQs off */
+FM1_INLINE void fm1_audio_start(int32_t *buf, uint32_t half_words, void (*isr)(void), uint32_t prio)
 {
     uint32_t i;
-    if (!fm1_audio_buffer_valid(buf, buffer_words, half_words)) return FM1_AUDIO_ERR_BUFFER;
-    if (rate != FM1_AUDIO_RATE) return FM1_AUDIO_ERR_RATE;
-    if (!isr || prio > 7u) return FM1_AUDIO_ERR_IRQ;
-    if (FM1_ALNK_CON0 & 0x800u) return FM1_AUDIO_ERR_BUSY;
-    /* Recognized stock audio PLL under M-VAVE and m-bootloader; never retune
-     * a shared PLL here. Unknown configurations cannot promise this rate. */
-    if (FM1_AUDIO_PLL_CON0 != FM1_AUDIO_PLL_STOCK0 ||
-        (FM1_AUDIO_PLL_CON1 & FM1_AUDIO_PLL_CON1_MASK) != (FM1_AUDIO_PLL_STOCK1 & FM1_AUDIO_PLL_CON1_MASK))
-        return FM1_AUDIO_ERR_CLOCK;
     fm1_irq_mask(FM1_IRQ_ALNK0);
     for (i = 0; i < 2u * half_words; i++)
         buf[i] = 0;
@@ -132,6 +126,26 @@ FM1_INLINE int fm1_audio_init_checked(int32_t *buf, uint32_t buffer_words, uint3
     FM1_ALNK_CON0 |= 0x800u;
     fm1_delay_ms(5);
     fm1__pc_out(6, 1);
+}
+
+/* PLL0's CON0 as the clock check reads it: 0 where nothing set it (an emulator that does not imitate the
+ * bootloader's PLL); an FM-1's bootloader always sets it (FRASIL card #163) */
+FM1_INLINE uint32_t fm1_audio_pll0(void) { return FM1_AUDIO_PLL_CON0; }
+
+__attribute__((warn_unused_result))
+FM1_INLINE int fm1_audio_init_checked(int32_t *buf, uint32_t buffer_words, uint32_t half_words,
+                                     uint32_t rate, void (*isr)(void), uint32_t prio)
+{
+    if (!fm1_audio_buffer_valid(buf, buffer_words, half_words)) return FM1_AUDIO_ERR_BUFFER;
+    if (rate != FM1_AUDIO_RATE) return FM1_AUDIO_ERR_RATE;
+    if (!isr || prio > 7u) return FM1_AUDIO_ERR_IRQ;
+    if (FM1_ALNK_CON0 & 0x800u) return FM1_AUDIO_ERR_BUSY;
+    /* Recognized stock audio PLL under M-VAVE and m-bootloader; never retune
+     * a shared PLL here. Unknown configurations cannot promise this rate. */
+    if (FM1_AUDIO_PLL_CON0 != FM1_AUDIO_PLL_STOCK0 ||
+        (FM1_AUDIO_PLL_CON1 & FM1_AUDIO_PLL_CON1_MASK) != (FM1_AUDIO_PLL_STOCK1 & FM1_AUDIO_PLL_CON1_MASK))
+        return FM1_AUDIO_ERR_CLOCK;
+    fm1_audio_start(buf, half_words, isr, prio);
     return FM1_AUDIO_OK;
 }
 

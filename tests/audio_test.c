@@ -101,6 +101,11 @@ static void validate(void)
     assert(masks == 0 && attaches == 0 && delays == 0 && !regs[0]);
     reset(); pll1 ^= 0x04000000u;              /* a bit under the mask: still unknown */
     assert(fm1_audio_init(ptr(0x1C00000), 2, isr, 3) == FM1_AUDIO_ERR_CLOCK);
+    reset(); pll0 = 0;                         /* unset (an emulator's, FRASIL card #163): refused, read as 0 */
+    assert(fm1_audio_init(ptr(0x1C00000), 2, isr, 3) == FM1_AUDIO_ERR_CLOCK && fm1_audio_pll0() == 0);
+    assert(masks == 0 && attaches == 0 && delays == 0 && !regs[0]);
+    reset();
+    assert(fm1_audio_pll0() == FM1_AUDIO_PLL_STOCK0);
 }
 int main(void)
 {
@@ -147,6 +152,16 @@ int main(void)
     fm1_audio_stop();
     reset(); pll1 ^= 0xF8000000u;              /* PLL0 CON1's top bits, outside the mask: not compared */
     assert(fm1_audio_init_checked(samples, 256, 128, 44100, isr, 3) == FM1_AUDIO_OK);
+    fm1_audio_stop();
+    /* PLL0 unset (FRASIL card #163): the checked start refuses; the start alone is the same sequence as its own */
+    reset(); pll0 = 0;
+    for (i = 0; i < 256; i++) samples[i] = 0x123456;
+    assert(fm1_audio_init_checked(samples, 256, 128, 44100, isr, 3) == FM1_AUDIO_ERR_CLOCK && masks == 0);
+    fm1_audio_start(samples, 128, isr, 3);
+    for (i = 0; i < 256; i++) assert(samples[i] == 0);
+    assert(regs[0] == 0x980u && regs[1] == 0x5000u && regs[3] == 0x83u);
+    assert(regs[0x20 / 4] == 128 && regs[0x1C / 4] == (uint32_t)(uintptr_t)samples);
+    assert(attaches == 1 && masks == 1 && delays == 10);
     fm1_audio_stop();
     assert(munmap(samples, 4096) == 0);
     puts("Audio: buffer/rate/clock rejection, startup, IRQs and stop/restart checks passed");
