@@ -20,6 +20,7 @@
 #define LDR_DATA_LO FL_DATA_LO
 #define LDR_DATA_HI FL_DATA_HI
 #define LDR_LAYOUT 1                                /* refuse a package not laid out for the SMK before any erase */
+#define LDR_RES 0                                   /* no resource region: the store is above BTIF, never written here */
 #define LDR_APP_SLOT 0x97FBCu                       /* app.bin's slot (fm1-base tools/fm1pkg_make.py: the FM-1's 0x8DFBC + 0xA000) */
 #define LDR_VM_OFF FL_APP_HI                        /* the package's VM descriptor: the stock SMK's settings store, 0x9D000 */
 /* (checked where the map is in: loader.c, tests/ldr_bounds_test.c) */
